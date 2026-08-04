@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.2.3
+# OCR 服务一键部署脚本 v2.3.0
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   curl -fsSL url | bash
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.2.3"
+VERSION="2.3.0"
 
 # Fix: curl|bash 管道模式下，交互 read 从 /dev/tty 读取
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -339,9 +339,12 @@ install_full() {
     docker run -d \
         --name media-saber-paddle-ocr \
         --restart unless-stopped \
+        --cpus="0.8" \
+        --memory="768m" \
+        --memory-swap="768m" \
         -p 127.0.0.1:9899:9899 \
         xylplm/media-saber-paddle-ocr:latest
-    echo -e "${GREEN}  容器已启动 (监听 127.0.0.1:9899)。${NC}"
+    echo -e "${GREEN}  容器已启动 (监听 127.0.0.1:9899，资源限制 CPU≤80%/内存≤768MB)。${NC}"
 
     # 生成 Nginx 配置
     echo -e "${BLUE}[8/8] 配置 Nginx 反向代理...${NC}"
@@ -416,8 +419,10 @@ BASESERVER
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        proxy_next_upstream error timeout http_503;
+        proxy_next_upstream_tries 3;
     }
 AUTHLOCATION
     else
@@ -430,8 +435,10 @@ AUTHLOCATION
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        proxy_next_upstream error timeout http_503;
+        proxy_next_upstream_tries 3;
     }
 NOMALLLOCATION
     fi
@@ -690,8 +697,10 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        proxy_next_upstream error timeout http_503;
+        proxy_next_upstream_tries 3;
     }
 }
 NEWCONF
@@ -736,8 +745,10 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        proxy_send_timeout 120s;
+        proxy_read_timeout 120s;
+        proxy_next_upstream error timeout http_503;
+        proxy_next_upstream_tries 3;
     }
 }
 NEWCONF
