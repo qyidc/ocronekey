@@ -2,18 +2,24 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.2.2
+# OCR 服务一键部署脚本 v2.2.3
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   curl -fsSL url | bash
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.2.2"
+VERSION="2.2.3"
 
-# Fix: curl|bash 管道模式下 read 从 /dev/tty 读取，不关管道
+# Fix: curl|bash 管道模式下，只对交互式 read (-p) 从 /dev/tty 读取
 if [ ! -t 0 ]; then
-    read() { builtin read "$@" </dev/tty; }
+    read() {
+        if [[ "$*" == *-p* ]]; then
+            builtin read "$@" </dev/tty
+        else
+            builtin read "$@"
+        fi
+    }
 fi
 
 # 颜色
