@@ -11,16 +11,19 @@ set -euo pipefail
 
 VERSION="2.2.3"
 
-# Fix: curl|bash 管道模式下，只对交互式 read (-p) 从 /dev/tty 读取
-if [ ! -t 0 ]; then
-    read() {
-        if [[ "$*" == *-p* ]]; then
-            builtin read "$@" </dev/tty
-        else
-            builtin read "$@"
-        fi
-    }
+# Fix: curl|bash 管道模式下，交互 read 从 /dev/tty 读取
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec 3</dev/tty
 fi
+
+# 交互式读取（自动选择正确的输入源）
+iread() {
+    if [ -t 0 ]; then
+        builtin read "$@"
+    else
+        builtin read "$@" <&3
+    fi
+}
 
 # 颜色
 RED='\033[0;31m'
@@ -104,7 +107,7 @@ get_public_ip() {
 confirm() {
     local prompt="$1"
     if $AUTO_YES; then return 0; fi
-    read -p "$prompt " answer
+    iread -p "$prompt " answer
     answer="${answer%$'\r'}"  # 修复 Windows CRLF
     [[ "$answer" =~ ^[Yy]$ ]]
 }
@@ -156,7 +159,7 @@ install_full() {
         DOMAIN="$ARG_DOMAIN"
         echo -e "${CYAN}  域名: $DOMAIN (命令行指定)${NC}"
     else
-        read -p "请输入域名 (例如: ocr.example.com): " DOMAIN
+        iread -p "请输入域名 (例如: ocr.example.com): " DOMAIN
     fi
     DOMAIN="${DOMAIN%$'\r'}"
     if [ -z "$DOMAIN" ]; then echo -e "${RED}域名不能为空${NC}"; return; fi
@@ -165,7 +168,7 @@ install_full() {
         EMAIL="$ARG_EMAIL"
         echo -e "${CYAN}  邮箱: $EMAIL (命令行指定)${NC}"
     else
-        read -p "请输入邮箱 (用于 Let's Encrypt): " EMAIL
+        iread -p "请输入邮箱 (用于 Let's Encrypt): " EMAIL
     fi
     EMAIL="${EMAIL%$'\r'}"
     if [ -z "$EMAIL" ]; then echo -e "${RED}邮箱不能为空${NC}"; return; fi
@@ -174,7 +177,7 @@ install_full() {
         APIKEY="$ARG_APIKEY"
         echo -e "${CYAN}  API Key: $APIKEY (命令行指定)${NC}"
     else
-        read -p "请输入 API Key (留空则无鉴权): " APIKEY
+        iread -p "请输入 API Key (留空则无鉴权): " APIKEY
     fi
     APIKEY="${APIKEY%$'\r'}"
     if [ -n "$APIKEY" ]; then
@@ -608,12 +611,12 @@ modify_apikey() {
     echo "  2. 自动生成随机 API Key"
     echo "  3. 清除 API Key（取消鉴权）"
     echo "  0. 返回"
-    read -p "  请选择 [1-3]: " KEY_CHOICE
+    iread -p "  请选择 [1-3]: " KEY_CHOICE
     KEY_CHOICE="${KEY_CHOICE%$'\r'}"  # 修复 Windows CRLF
 
     NEW_KEY=""
     case "$KEY_CHOICE" in
-        1) read -p "  请输入新的 API Key: " NEW_KEY
+        1) iread -p "  请输入新的 API Key: " NEW_KEY
            NEW_KEY="${NEW_KEY%$'\r'}"  # 修复 Windows CRLF
            ;;
         2) NEW_KEY=$(openssl rand -hex 16); echo -e "  已生成: ${GREEN}$NEW_KEY${NC}" ;;
@@ -837,7 +840,7 @@ main_menu() {
         echo "  6. 完全卸载"
         echo "  7. 退出脚本"
         echo ""
-        read -p "  请选择 [1-7]: " CHOICE
+        iread -p "  请选择 [1-7]: " CHOICE
         CHOICE="${CHOICE%$'\r'}"  # 修复 Windows CRLF
 
         case "$CHOICE" in
@@ -853,7 +856,7 @@ main_menu() {
 
         echo ""
         if [ "$CHOICE" != "7" ]; then
-            read -p "按回车返回菜单..."
+            iread -p "按回车返回菜单..."
         fi
     done
 }
