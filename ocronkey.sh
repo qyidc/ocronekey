@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.2.0
+# OCR 服务一键部署脚本 v2.2.1
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   bash ocronkey.sh
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.2.0"
+VERSION="2.2.1"
 
 # 颜色
 RED='\033[0;31m'
@@ -94,6 +94,7 @@ confirm() {
     local prompt="$1"
     if $AUTO_YES; then return 0; fi
     read -p "$prompt " answer
+    answer="${answer%$'\r'}"  # 修复 Windows CRLF
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
@@ -146,6 +147,7 @@ install_full() {
     else
         read -p "请输入域名 (例如: ocr.example.com): " DOMAIN
     fi
+    DOMAIN="${DOMAIN%$'\r'}"
     if [ -z "$DOMAIN" ]; then echo -e "${RED}域名不能为空${NC}"; return; fi
 
     if [ -n "$ARG_EMAIL" ]; then
@@ -154,6 +156,7 @@ install_full() {
     else
         read -p "请输入邮箱 (用于 Let's Encrypt): " EMAIL
     fi
+    EMAIL="${EMAIL%$'\r'}"
     if [ -z "$EMAIL" ]; then echo -e "${RED}邮箱不能为空${NC}"; return; fi
 
     if [ -n "$ARG_APIKEY" ]; then
@@ -162,6 +165,7 @@ install_full() {
     else
         read -p "请输入 API Key (留空则无鉴权): " APIKEY
     fi
+    APIKEY="${APIKEY%$'\r'}"
     if [ -n "$APIKEY" ]; then
         echo -e "${GREEN}  API Key 鉴权已启用。${NC}"
     else
@@ -594,10 +598,13 @@ modify_apikey() {
     echo "  3. 清除 API Key（取消鉴权）"
     echo "  0. 返回"
     read -p "  请选择 [1-3]: " KEY_CHOICE
+    KEY_CHOICE="${KEY_CHOICE%$'\r'}"  # 修复 Windows CRLF
 
     NEW_KEY=""
     case "$KEY_CHOICE" in
-        1) read -p "  请输入新的 API Key: " NEW_KEY ;;
+        1) read -p "  请输入新的 API Key: " NEW_KEY
+           NEW_KEY="${NEW_KEY%$'\r'}"  # 修复 Windows CRLF
+           ;;
         2) NEW_KEY=$(openssl rand -hex 16); echo -e "  已生成: ${GREEN}$NEW_KEY${NC}" ;;
         3) NEW_KEY=""; echo -e "  将清除 API Key 鉴权。${NC}" ;;
         0) return ;;
@@ -820,6 +827,7 @@ main_menu() {
         echo "  7. 退出脚本"
         echo ""
         read -p "  请选择 [1-7]: " CHOICE
+        CHOICE="${CHOICE%$'\r'}"  # 修复 Windows CRLF
 
         case "$CHOICE" in
             1) install_full ;;
