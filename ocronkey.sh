@@ -11,8 +11,10 @@ set -euo pipefail
 
 VERSION="2.2.2"
 
-# Fix: curl|bash 时 stdin 被管道占用，重定向到终端才能交互
-if [ ! -t 0 ]; then exec </dev/tty; fi
+# Fix: curl|bash 管道模式下 read 从 /dev/tty 读取，不关管道
+if [ ! -t 0 ]; then
+    read() { builtin read "$@" </dev/tty; }
+fi
 
 # 颜色
 RED='\033[0;31m'
