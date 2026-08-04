@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.0.1
+# OCR 服务一键部署脚本 v2.1.0
 # 仓库: https://github.com/qyidc/ocronekey
 # 包含: 依赖安装、域名解析检查、端口开放检测、SWAP自动配置、
 #       NTP同步、acme.sh自动升级、证书申请、Nginx智能集成
@@ -11,7 +11,7 @@ set -euo pipefail
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com [-y]
 # =====================================================
 
-VERSION="2.0.1"
+VERSION="2.1.0"
 
 # 颜色
 RED='\033[0;31m'
@@ -25,10 +25,12 @@ NC='\033[0m'
 AUTO_YES=false
 ARG_DOMAIN=""
 ARG_EMAIL=""
+ARG_APIKEY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --domain)   ARG_DOMAIN="$2"; shift 2 ;;
         --email)    ARG_EMAIL="$2";  shift 2 ;;
+        --apikey)   ARG_APIKEY="$2"; shift 2 ;;
         -y|--yes)   AUTO_YES=true;   shift ;;
         -v|--version) echo "OCR一键部署脚本 v${VERSION}"; exit 0 ;;
         -h|--help)
@@ -37,6 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo "选项:"
             echo "  --domain DOMAIN    指定域名 (非交互模式)"
             echo "  --email EMAIL      指定邮箱 (非交互模式)"
+            echo "  --apikey KEY       设置 API Key 鉴权 (可选，不设置则无鉴权)"
             echo "  -y, --yes          自动确认所有提示"
             echo "  -v, --version      显示版本号"
             echo "  -h, --help         显示帮助"
@@ -146,6 +149,19 @@ else
     read -p "请输入邮箱 (用于 Let's Encrypt): " EMAIL
 fi
 if [ -z "$EMAIL" ]; then echo -e "${RED}邮箱不能为空${NC}"; exit 1; fi
+
+# API Key (可选)
+if [ -n "$ARG_APIKEY" ]; then
+    APIKEY="$ARG_APIKEY"
+    echo -e "${CYAN}  API Key: $APIKEY (命令行指定)${NC}"
+else
+    read -p "请输入 API Key (留空跳过鉴权，直接回车): " APIKEY
+fi
+if [ -n "$APIKEY" ]; then
+    echo -e "${GREEN}  API Key 鉴权已启用。${NC}"
+else
+    echo -e "${YELLOW}  未设置 API Key，服务无鉴权（任何人可访问）。${NC}"
+fi
 
 # ----- 4. 预检：域名解析 -----
 echo -e "${BLUE}[预检] 检查域名解析...${NC}"
@@ -330,6 +346,21 @@ cat > "$SITE_CONF" <<EOF
 # OCR 服务 - $DOMAIN
 # 生成于 $(date)
 # 脚本版本: v${VERSION}
+EOF
+
+# 如果设置了 API Key，添加 map 鉴权
+if [ -n "$APIKEY" ]; then
+    cat >> "$SITE_CONF" <<EOF
+
+# API Key 鉴权
+map \$http_x_api_key \$api_auth_ok {
+    default     0;
+    "$APIKEY"   1;
+}
+EOF
+fi
+
+cat >> "$SITE_CONF" <<EOF
 
 server {
     listen 80;
@@ -357,6 +388,36 @@ server {
         root $WEBROOT;
         default_type text/plain;
     }
+EOF
+
+if [ -n "$APIKEY" ]; then
+    cat >> "$SITE_CONF" <<EOF
+
+    # /health 不校验 API Key
+    location = /health {
+        proxy_pass http://127.0.0.1:9899/health;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location / {
+        if (\$api_auth_ok = 0) {
+            return 401 '{"error":"Invalid or missing API Key"}';
+        }
+        proxy_pass http://127.0.0.1:9899;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+EOF
+else
+    cat >> "$SITE_CONF" <<EOF
 
     location / {
         proxy_pass http://127.0.0.1:9899;
@@ -368,8 +429,10 @@ server {
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
-}
 EOF
+fi
+
+echo "}" >> "$SITE_CONF"
 
 # 启用站点
 if [ "$SITES_AVAILABLE" != "$SITES_ENABLED" ]; then
@@ -397,6 +460,14 @@ echo "  健康检查: https://$DOMAIN/health"
 echo "  通用识别(文件): POST https://$DOMAIN/general/file"
 echo "  通用识别(Base64): POST https://$DOMAIN/general/base64"
 echo "  验证码识别: POST https://$DOMAIN/captcha/base64"
+if [ -n "$APIKEY" ]; then
+    echo ""
+    echo -e "${GREEN}  API Key: $APIKEY${NC}"
+    echo -e "${YELLOW}  调用时需在请求头添加: X-API-Key: $APIKEY${NC}"
+else
+    echo ""
+    echo -e "${RED}  ⚠ 未设置 API Key，服务无鉴权保护！${NC}"
+fi
 echo ""
 echo -e "${BLUE}📁 证书信息：${NC}"
 echo "  证书目录: $CERT_DIR"
