@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.0
+# OCR 服务一键部署脚本 v2.0.1
 # 仓库: https://github.com/qyidc/ocronekey
 # 包含: 依赖安装、域名解析检查、端口开放检测、SWAP自动配置、
 #       NTP同步、acme.sh自动升级、证书申请、Nginx智能集成
@@ -11,7 +11,7 @@ set -euo pipefail
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com [-y]
 # =====================================================
 
-VERSION="2.0.0"
+VERSION="2.0.1"
 
 # 颜色
 RED='\033[0;31m'
@@ -343,7 +343,6 @@ server {
 
 server {
     listen 443 ssl;
-    http2 on;
     server_name $DOMAIN;
 
     ssl_certificate $CERT_DIR/cert.pem;
