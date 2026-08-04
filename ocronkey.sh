@@ -2,14 +2,17 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.2.1
+# OCR 服务一键部署脚本 v2.2.2
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
-#   菜单模式:   bash ocronkey.sh
+#   菜单模式:   curl -fsSL url | bash
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.2.1"
+VERSION="2.2.2"
+
+# Fix: curl|bash 时 stdin 被管道占用，重定向到终端才能交互
+if [ ! -t 0 ]; then exec </dev/tty; fi
 
 # 颜色
 RED='\033[0;31m'
