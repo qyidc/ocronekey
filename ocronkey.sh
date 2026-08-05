@@ -349,6 +349,7 @@ install_full() {
         --health-interval=10s \
         --health-retries=1 \
         --health-timeout=5s \
+        --health-start-period=60s \
         -p 127.0.0.1:9899:9899 \
         xylplm/media-saber-paddle-ocr:latest
     echo -e "${GREEN}  容器已启动 (监听 127.0.0.1:9899，资源限制 CPU≤80%/内存≤768MB，挂死自动重启)。${NC}"

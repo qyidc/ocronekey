@@ -23,6 +23,7 @@ docker run -d \
     --health-interval=10s \
     --health-retries=1 \
     --health-timeout=5s \
+    --health-start-period=60s \
     -p 127.0.0.1:9899:9899 \
     xylplm/media-saber-paddle-ocr:latest
 
