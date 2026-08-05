@@ -1,6 +1,6 @@
 #!/bin/bash
 # =====================================================
-# OCR 服务修复脚本 v2 — 应对 1C1G VPS OCR 挂死问题
+# OCR 服务修复脚本 v3 — Nginx upstream + max_conns
 # 用法: bash deploy_fix.sh
 # =====================================================
 
@@ -8,7 +8,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}[1/3] 重建 Docker 容器...${NC}"
+echo -e "${YELLOW}[1/3] 重建 Docker 容器 (v3: 无 CPU/内存限制)...${NC}"
 
 docker stop media-saber-paddle-ocr 2>/dev/null || true
 docker rm media-saber-paddle-ocr 2>/dev/null || true
@@ -16,9 +16,6 @@ docker rm media-saber-paddle-ocr 2>/dev/null || true
 docker run -d \
     --name media-saber-paddle-ocr \
     --restart unless-stopped \
-    --cpus="0.8" \
-    --memory="768m" \
-    --memory-swap="768m" \
     --health-cmd="curl -f -m 5 http://localhost:9899/health || exit 1" \
     --health-interval=10s \
     --health-retries=1 \
