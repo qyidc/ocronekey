@@ -7,7 +7,7 @@ set -euo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-VERSION="3.1.0"
+SCRIPT_VERSION="3.1.1"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -32,7 +32,7 @@ NC='\033[0m'
 banner() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  OCR 一站式部署 v${VERSION}${NC}"
+    echo -e "${GREEN}  OCR 一站式部署 v${SCRIPT_VERSION}${NC}"
     echo -e "${GREEN}========================================${NC}"
 }
 
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
         --email)  ARG_EMAIL="$2";  shift 2 ;;
         --apikey) ARG_APIKEY="$2"; shift 2 ;;
         -y|--yes) AUTO_YES=true;   shift ;;
-        -v|--version) echo "OCR一站式部署 v${VERSION}"; exit 0 ;;
+        -v|--version) echo "OCR一站式部署 v${SCRIPT_VERSION}"; exit 0 ;;
         -h|--help)
             echo "用法: bash ocronkey.sh [选项]"
             echo ""
@@ -109,7 +109,7 @@ get_nginx_dirs() {
 detect_install() {
     get_nginx_dirs
     local conf
-    conf=$(ls "$SITES_AVAILABLE"/ocr-*.conf 2>/dev/null | head -1)
+    conf=$(shopt -s nullglob; ls "$SITES_AVAILABLE"/ocr-*.conf 2>/dev/null | head -1 || true)
     [ -n "$conf" ] && basename "$conf" | sed 's/^ocr-//;s/\.conf$//'
 }
 
@@ -312,7 +312,7 @@ install_full() {
 
     cat > "$SITE_CONF" <<HEADER
 # OCR 服务 - $DOMAIN
-# 脚本版本: v${VERSION} | 生成于 $(date)
+# 脚本版本: v${SCRIPT_VERSION} | 生成于 $(date)
 
 HEADER
 
@@ -800,7 +800,7 @@ modify_apikey() {
     if [ -n "$NEW_KEY" ]; then
         cat > "$SITE_CONF" <<KEYCONF
 # OCR 服务 - $DOMAIN
-# 更新于 $(date) | 脚本版本 v${VERSION}
+# 更新于 $(date) | 脚本版本 v${SCRIPT_VERSION}
 
 map \$http_x_api_key \$api_auth_ok {
     default     0;
@@ -863,7 +863,7 @@ KEYCONF
     else
         cat > "$SITE_CONF" <<NOKEYCONF
 # OCR 服务 - $DOMAIN
-# 更新于 $(date) | 脚本版本 v${VERSION}
+# 更新于 $(date) | 脚本版本 v${SCRIPT_VERSION}
 
 upstream ocr_backend {
     server 127.0.0.1:9899 max_conns=1;
