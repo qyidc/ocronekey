@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 # =====================================================
 # OCR 一站式部署脚本 v3.0
@@ -7,7 +7,7 @@ set -euo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.1"
+SCRIPT_VERSION="3.1.2"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
