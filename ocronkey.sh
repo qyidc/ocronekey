@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.3.2
+# OCR 服务一键部署脚本 v2.3.3
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   curl -fsSL url | bash
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.3.1"
+VERSION="2.3.3"
 
 # Fix: curl|bash 管道模式下，交互 read 从 /dev/tty 读取
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -345,9 +345,13 @@ install_full() {
         --cpus="0.8" \
         --memory="768m" \
         --memory-swap="768m" \
+        --health-cmd="curl -f -m 5 http://localhost:9899/health || exit 1" \
+        --health-interval=10s \
+        --health-retries=1 \
+        --health-timeout=5s \
         -p 127.0.0.1:9899:9899 \
         xylplm/media-saber-paddle-ocr:latest
-    echo -e "${GREEN}  容器已启动 (监听 127.0.0.1:9899，资源限制 CPU≤80%/内存≤768MB)。${NC}"
+    echo -e "${GREEN}  容器已启动 (监听 127.0.0.1:9899，资源限制 CPU≤80%/内存≤768MB，挂死自动重启)。${NC}"
 
     # 生成 Nginx 配置
     echo -e "${BLUE}[8/8] 配置 Nginx 反向代理...${NC}"

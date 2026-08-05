@@ -19,6 +19,10 @@ docker run -d \
     --cpus="0.8" \
     --memory="768m" \
     --memory-swap="768m" \
+    --health-cmd="curl -f -m 5 http://localhost:9899/health || exit 1" \
+    --health-interval=10s \
+    --health-retries=1 \
+    --health-timeout=5s \
     -p 127.0.0.1:9899:9899 \
     xylplm/media-saber-paddle-ocr:latest
 
