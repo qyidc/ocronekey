@@ -4,10 +4,10 @@ set -euo pipefail
 # =====================================================
 # OCR 一站式部署脚本 v3.0
 # 仓库: https://github.com/qyidc/ocronekey
-# 包含: Docker OCR + Nginx SSL + D1/R2 同步守护进程
+# 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -127,24 +127,7 @@ sync_status() {
     systemctl is-active ocr-worker 2>/dev/null || echo "已停止"
 }
 
-# ---- D1 API 调用 ----
-d1_call() {
-    local sql="$1"
-    curl -s --max-time 15 \
-        -H "Authorization: Bearer $CF_API_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{\"sql\":\"${sql//\"/\\\"}\",\"params\":[]}" \
-        "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$D1_DATABASE_ID/query"
-}
 
-d1_call_json() {
-    local json_body="$1"
-    curl -s --max-time 15 \
-        -H "Authorization: Bearer $CF_API_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$json_body" \
-        "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$D1_DATABASE_ID/query"
-}
 
 # ======================== 1. 全新安装 ========================
 install_full() {
@@ -452,57 +435,46 @@ config_sync() {
     DOMAIN=$(detect_install)
     [ -z "$DOMAIN" ] && { echo -e "${RED}请先安装 OCR 服务（选项 1）。${NC}"; return; }
 
-    echo -e "${BLUE}配置 Worker 同步 — 连接 Cloudflare D1 + R2${NC}"
+    echo -e "${BLUE}配置 Worker 同步 — VPS 轮询 Worker API (push 模式)${NC}"
     echo ""
 
     # 参数收集
-    iread -p "Cloudflare Account ID: " CF_ACCOUNT_ID
-    CF_ACCOUNT_ID="${CF_ACCOUNT_ID%$'\r'}"
+    iread -p "Worker 域名 (如 https://doc.otwx.top): " BASE_URL
+    BASE_URL="${BASE_URL%$'\r'}"
+    [ -z "$BASE_URL" ] && { echo -e "${RED}Worker 域名不能为空${NC}"; return; }
+    # 去掉尾部斜杠
+    BASE_URL="${BASE_URL%/}"
 
-    iread -p "Cloudflare API Token (需 D1 读写 + R2 读权限): " CF_API_TOKEN
-    CF_API_TOKEN="${CF_API_TOKEN%$'\r'}"
+    iread -p "Worker Secret (与 Worker 端一致): " WORKER_SECRET
+    WORKER_SECRET="${WORKER_SECRET%$'\r'}"
+    [ -z "$WORKER_SECRET" ] && { echo -e "${RED}Secret 不能为空${NC}"; return; }
 
-    iread -p "D1 数据库 ID: " D1_DATABASE_ID
-    D1_DATABASE_ID="${D1_DATABASE_ID%$'\r'}"
-
-    iread -p "R2 公开域名 (如 r2.example.com, 留空则图片 URL 直链): " R2_DOMAIN
-    R2_DOMAIN="${R2_DOMAIN%$'\r'}"
-
-    iread -p "轮询间隔 (秒, 默认 15): " POLL_INTERVAL
+    iread -p "轮询间隔 (秒, 默认 5): " POLL_INTERVAL
     POLL_INTERVAL="${POLL_INTERVAL%$'\r'}"
-    [ -z "$POLL_INTERVAL" ] && POLL_INTERVAL=15
+    [ -z "$POLL_INTERVAL" ] && POLL_INTERVAL=5
 
     echo ""
 
-    # 验证 D1 连接
-    echo -e "${BLUE}测试 D1 连接...${NC}"
-    RESP=$(d1_call "SELECT 1 AS test")
-    if echo "$RESP" | grep -q '"success":true'; then
-        echo -e "${GREEN}  D1 连接成功。${NC}"
+    # 验证连接
+    echo -e "${BLUE}测试 Worker 连接...${NC}"
+    TEST_RESP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 \
+        -H "X-Worker-Secret: $WORKER_SECRET" \
+        "$BASE_URL/api/ocr-tasks/next" 2>&1)
+    if [ "$TEST_RESP" = "200" ] || [ "$TEST_RESP" = "204" ] || [ "$TEST_RESP" = "404" ]; then
+        # 200=有任务, 204/404=无任务, 都是正常连接
+        echo -e "${GREEN}  Worker 连接成功 (HTTP $TEST_RESP)。${NC}"
     else
-        echo -e "${RED}  D1 连接失败: $(echo "$RESP" | head -c 200)${NC}"
+        echo -e "${RED}  Worker 连接失败 (HTTP $TEST_RESP)，请检查 URL 和 Secret。${NC}"
         return
     fi
 
-    # 建表
-    echo -e "${BLUE}创建 ocr_tasks 表...${NC}"
-    CREATE_SQL="CREATE TABLE IF NOT EXISTS ocr_tasks (id TEXT PRIMARY KEY, image_url TEXT NOT NULL, status TEXT DEFAULT 'pending', result TEXT, error TEXT, created_at TEXT, updated_at TEXT)"
-    RESP=$(d1_call "$CREATE_SQL")
-    if echo "$RESP" | grep -q '"success":true'; then
-        echo -e "${GREEN}  表已就绪。${NC}"
-    else
-        echo -e "${YELLOW}  建表返回: $(echo "$RESP" | head -c 200)${NC}"
-    fi
-
     # 生成配置目录
-    mkdir -p /opt/ocr
+    mkdir -p /opt/ocr /tmp/ocr-worker
 
     # 写配置文件
     cat > /opt/ocr/ocr_worker.conf <<CONF
-CF_ACCOUNT_ID="$CF_ACCOUNT_ID"
-CF_API_TOKEN="$CF_API_TOKEN"
-D1_DATABASE_ID="$D1_DATABASE_ID"
-R2_DOMAIN="$R2_DOMAIN"
+BASE_URL="$BASE_URL"
+WORKER_SECRET="$WORKER_SECRET"
 POLL_INTERVAL=$POLL_INTERVAL
 CONF
     chmod 600 /opt/ocr/ocr_worker.conf
@@ -510,92 +482,116 @@ CONF
     # 生成 Worker 脚本
     cat > /opt/ocr/ocr_worker.sh << 'WORKEREOF'
 #!/bin/bash
-# OCR 同步守护进程 — 轮询 D1 任务 → 本地 OCR → 写回结果
-# 由 ocronkey.sh v3.0 生成
+# OCR 同步守护进程 — 轮询 Worker API → 本地 OCR → 回传结果
+# 由 ocronkey.sh v3.1 生成
 
 set -euo pipefail
 source /opt/ocr/ocr_worker.conf
 
+PADDLE_URL="http://127.0.0.1:9899"
+TEMP_DIR="/tmp/ocr-worker"
 LOG_FILE="/var/log/ocr_worker.log"
-touch "$LOG_FILE"
+
+mkdir -p "$TEMP_DIR"
 exec >>"$LOG_FILE" 2>&1
 
 echolog() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
-# D1 API 调用
-d1_query() {
-    local json_body="$1"
-    curl -s --max-time 15 \
-        -H "Authorization: Bearer $CF_API_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "$json_body" \
-        "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$D1_DATABASE_ID/query"
-}
-
-echolog "=== OCR Worker 启动 ==="
+echolog "=== OCR Worker v3.1 启动 ==="
+echolog "Worker: $BASE_URL"
 echolog "轮询间隔: ${POLL_INTERVAL}s"
 
 while true; do
-    # 查询待处理任务
-    RESP=$(d1_query '{"sql":"SELECT id, image_url FROM ocr_tasks WHERE status = '\''pending'\'' LIMIT 1","params":[]}')
-    SUCCESS=$(echo "$RESP" | jq -r '.success // false')
-
-    if [ "$SUCCESS" != "true" ]; then
-        echolog "WARN: D1 查询失败, 30s 后重试"
-        sleep 30
+    # 1. 拉取下一个待处理任务
+    TASK_JSON=$(curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
+        "$BASE_URL/api/ocr-tasks/next" 2>/dev/null) || {
+        echolog "WARN: 网络异常, 5s 后重试"
+        sleep 5
         continue
-    fi
+    }
 
-    TASK_ID=$(echo "$RESP" | jq -r '.result[0].results[0].id // empty')
-    IMAGE_URL=$(echo "$RESP" | jq -r '.result[0].results[0].image_url // empty')
+    TASK_ID=$(echo "$TASK_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
 
     if [ -z "$TASK_ID" ]; then
         sleep "$POLL_INTERVAL"
         continue
     fi
 
-    echolog "处理任务: $TASK_ID"
-    echolog "  图片: $IMAGE_URL"
+    DOC_ID=$(echo "$TASK_JSON" | grep -o '"documentId":[0-9]*' | head -1 | grep -o '[0-9]*')
+    PAGE_NUM=$(echo "$TASK_JSON" | grep -o '"pageNum":[0-9]*' | head -1 | grep -o '[0-9]*')
 
-    # 标记 processing
-    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    JSON_MARK=$(jq -n --arg id "$TASK_ID" --arg now "$NOW" \
-        '{sql:"UPDATE ocr_tasks SET status = ?, updated_at = ? WHERE id = ?", params:["processing", $now, $id]}')
-    d1_query "$JSON_MARK"
+    echolog "处理: task=$TASK_ID doc=$DOC_ID page=$PAGE_NUM"
 
-    # 下载图片
-    IMG_BASE64=$(curl -s --max-time 30 "$IMAGE_URL" | base64 -w0 2>/dev/null || curl -s --max-time 30 "$IMAGE_URL" | base64 2>/dev/null)
-    if [ -z "$IMG_BASE64" ]; then
+    # 2. 下载图片到文件（避免大 base64 占满内存）
+    IMG_FILE="$TEMP_DIR/task_${TASK_ID}.jpg"
+    if ! curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
+        --max-time 30 \
+        "$BASE_URL/api/ocr-tasks/$TASK_ID/image" -o "$IMG_FILE" 2>/dev/null; then
         echolog "  ERROR: 下载图片失败"
-        JSON_FAIL=$(jq -n --arg id "$TASK_ID" --arg now "$NOW" \
-            '{sql:"UPDATE ocr_tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?", params:["failed", "download failed", $now, $id]}')
-        d1_query "$JSON_FAIL"
+        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"error":"下载图片失败"}' \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        rm -f "$IMG_FILE"
         continue
     fi
 
-    # OCR 识别 (直连容器，不限时)
-    echolog "  开始 OCR..."
-    OCR_RESP=$(curl -s -w "\n%{http_code}" --max-time 300 \
-        -X POST http://127.0.0.1:9899/general/base64 \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n --arg img "$IMG_BASE64" '{image: $img}')" 2>&1)
-    OCR_CODE=$(echo "$OCR_RESP" | tail -1)
-    OCR_BODY=$(echo "$OCR_RESP" | sed '$d')
+    # 3. base64 编码
+    BASE64_IMG=$(base64 -w 0 "$IMG_FILE" 2>/dev/null || base64 "$IMG_FILE" 2>/dev/null)
+    rm -f "$IMG_FILE"
 
-    if [ "$OCR_CODE" = "200" ]; then
-        echolog "  OCR 成功"
-        NOW2=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        JSON_DONE=$(jq -n --arg id "$TASK_ID" --arg result "$OCR_BODY" --arg now "$NOW2" \
-            '{sql:"UPDATE ocr_tasks SET status = ?, result = ?, updated_at = ? WHERE id = ?", params:["done", $result, $now, $id]}')
-        d1_query "$JSON_DONE"
+    if [ -z "$BASE64_IMG" ]; then
+        echolog "  ERROR: base64 编码失败"
+        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"error":"base64 编码失败"}' \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        continue
+    fi
+
+    # 4. 本地 OCR 识别（不限时）
+    echolog "  开始 OCR..."
+    OCR_RESP=$(curl -s --max-time 300 \
+        -X POST "$PADDLE_URL/general/base64" \
+        -H "Content-Type: application/json" \
+        -d "{\"image\":\"$BASE64_IMG\"}" 2>/dev/null) || {
+        echolog "  ERROR: PaddleOCR 不可用"
+        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"error":"PaddleOCR 服务不可用"}' \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        continue
+    }
+
+    # 5. 提取识别文本（解析 rec_texts 字段）
+    OCR_TEXT=$(echo "$OCR_RESP" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    texts = []
+    for r in data.get('results', []):
+        texts.extend(r.get('rec_texts', []))
+    print('\n'.join(texts))
+except Exception:
+    pass
+" 2>/dev/null)
+
+    if [ -n "$OCR_TEXT" ]; then
+        # 用 python3 安全转义 JSON
+        ESCAPED_TEXT=$(echo "$OCR_TEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":$ESCAPED_TEXT}" \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        echolog "  完成: task=$TASK_ID, chars=${#OCR_TEXT}"
     else
-        echolog "  OCR 失败 (HTTP $OCR_CODE)"
-        NOW2=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        JSON_FAIL=$(jq -n --arg id "$TASK_ID" --arg err "OCR HTTP $OCR_CODE: $OCR_BODY" --arg now "$NOW2" \
-            '{sql:"UPDATE ocr_tasks SET status = ?, error = ?, updated_at = ? WHERE id = ?", params:["failed", $err, $now, $id]}')
-        d1_query "$JSON_FAIL"
+        echolog "  无文字: task=$TASK_ID"
+        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"error":"无识别结果"}' \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
     fi
 done
 WORKEREOF
@@ -604,7 +600,7 @@ WORKEREOF
     # 创建 systemd 服务
     cat > /etc/systemd/system/ocr-worker.service <<SERVICEEOF
 [Unit]
-Description=OCR Sync Worker (D1 + R2)
+Description=OCR Sync Worker (Worker API)
 After=network.target docker.service
 
 [Service]
@@ -628,14 +624,17 @@ SERVICEEOF
     echo -e "${GREEN}  同步配置完成！${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
-    echo -e "  配置文件:   /opt/ocr/ocr_worker.conf"
-    echo -e "  Worker 脚本: /opt/ocr/ocr_worker.sh"
-    echo -e "  日志文件:   /var/log/ocr_worker.log"
-    echo -e "  轮询间隔:   ${POLL_INTERVAL}s"
-    echo -e "  状态:       $(systemctl is-active ocr-worker 2>/dev/null)"
+    echo -e "  Worker URL:  ${BASE_URL}"
+    echo -e "  配置文件:     /opt/ocr/ocr_worker.conf"
+    echo -e "  Worker 脚本:  /opt/ocr/ocr_worker.sh"
+    echo -e "  日志文件:     /var/log/ocr_worker.log"
+    echo -e "  轮询间隔:     ${POLL_INTERVAL}s"
+    echo -e "  状态:         $(systemctl is-active ocr-worker 2>/dev/null)"
     echo ""
-    echo -e "${BLUE}Worker 端 D1 SQL 示例:${NC}"
-    echo "  INSERT INTO ocr_tasks (id, image_url, status) VALUES ('task-001', 'https://${R2_DOMAIN:-your-r2}/page1.png', 'pending');"
+    echo -e "${BLUE}Worker 端需要在 Cloudflare Worker 中实现三个端点:${NC}"
+    echo "  GET  ${BASE_URL}/api/ocr-tasks/next        → 返回下一个待处理任务"
+    echo "  GET  ${BASE_URL}/api/ocr-tasks/{id}/image  → 返回图片二进制"
+    echo "  POST ${BASE_URL}/api/ocr-tasks/{id}/result → 接收识别结果 {text} 或 {error}"
     echo ""
 }
 
@@ -1027,7 +1026,7 @@ main_menu() {
         fi
         echo ""
         echo "  1. 全新安装 OCR 服务"
-        echo "  2. 配置 Worker 同步     (D1 + R2 对接)"
+        echo "  2. 配置 Worker 同步     (VPS 轮询 Worker API)"
         echo "  3. 同步服务管理         (启动/停止/重启)"
         echo "  4. 查看配置信息"
         echo "  5. 查看证书到期时间"
