@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.3.1
+# OCR 服务一键部署脚本 v2.3.2
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   curl -fsSL url | bash
@@ -135,7 +135,8 @@ detect_install() {
 # 从 Nginx 配置中提取 API Key
 get_apikey_from_conf() {
     local conf="$1"
-    grep -oP '"([^"]+)"' "$conf" 2>/dev/null | head -1 | tr -d '"'
+    # 只在 map 块内提取，避免匹配到 401 错误消息中的引号
+    awk '/map.*api_auth_ok/,/^}/' "$conf" 2>/dev/null | grep -o '"[^"]*"' | tail -1 | tr -d '"'
 }
 
 # ======================== 1. 全新安装 ========================
@@ -265,9 +266,11 @@ install_full() {
             ubuntu|debian)
                 $PKG_INSTALL ca-certificates
                 install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+                local docker_repo="ubuntu"
+                [ "$OS_ID" = "debian" ] && docker_repo="debian"
+                curl -fsSL "https://download.docker.com/linux/${docker_repo}/gpg" -o /etc/apt/keyrings/docker.asc
                 chmod a+r /etc/apt/keyrings/docker.asc
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+                echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${docker_repo} $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
                 apt-get update
                 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
                 ;;
@@ -762,7 +765,9 @@ NEWCONF
         fi
     else
         echo -e "${RED}  Nginx 配置测试失败，已恢复备份。${NC}"
-        cp "$SITE_CONF.bak."* "$SITE_CONF" 2>/dev/null
+        local bak
+        bak=$(ls -1t "$SITE_CONF.bak."* 2>/dev/null | head -1)
+        [ -n "$bak" ] && cp "$bak" "$SITE_CONF"
     fi
     echo ""
 }

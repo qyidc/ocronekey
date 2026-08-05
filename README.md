@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/qyidc/ocronekey/main/ocronkey.sh | 
 ### 自动化模式（无人值守）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/qyidc/ocronekey/main/ocronkey.sh | bash -s -- --domain ocr.example.com --email admin@example.com -y
+curl -fsSL https://raw.githubusercontent.com/qyidc/ocronekey/main/ocronkey.sh | bash -s -- --domain ocr.example.com --email admin@example.com --apikey my-secret-key -y
 ```
 
 ## 前置要求
@@ -47,6 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/qyidc/ocronekey/main/ocronkey.sh | 
 |------|------|
 | `--domain DOMAIN` | 指定域名（非交互模式） |
 | `--email EMAIL` | 指定邮箱（非交互模式，用于 Let's Encrypt） |
+| `--apikey KEY` | 设置 API Key（可选，非交互模式） |
 | `-y, --yes` | 自动确认所有提示 |
 | `-v, --version` | 显示版本号 |
 | `-h, --help` | 显示帮助信息 |
@@ -90,8 +91,10 @@ acme.sh 安装时会自动配置 cron 定时任务，证书到期前自动续期
 
 ```
 ocronekey/
-├── ocronkey.sh    # 主部署脚本
-└── .gitignore     # Git 忽略规则
+├── ocronkey.sh       # 主部署脚本（菜单化交互）
+├── deploy_fix.sh     # 资源限制修复脚本（Docker CPU/内存 + Nginx 超时）
+├── monitor_ocr.sh    # 错误监控脚本（503/504 自动记录日志）
+└── README.md         # 项目说明
 ```
 
 ## 技术栈
