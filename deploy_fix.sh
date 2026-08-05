@@ -37,15 +37,11 @@ if [ -z "$SITE_CONF" ]; then
     exit 0
 fi
 
-# 如果不存在 upstream 块，在第一个 server 之前插入
-if ! grep -q "upstream ocr_backend" "$SITE_CONF"; then
-    sed -i '/^server {/i\
-# 串行化后端请求 — 1C1G VPS 一次只处理一张图\
-upstream ocr_backend {\
-    server 127.0.0.1:9899 max_conns=1;\
-}\
-' "$SITE_CONF"
-fi
+# 先清理可能已存在的重复 upstream 块
+sed -i '/^upstream ocr_backend {/,/^}/d' "$SITE_CONF"
+
+# 在第一个 server 块前面精准插入 upstream（不会重复）
+sed -i '1,/^server {/s/^server {/upstream ocr_backend {\n    server 127.0.0.1:9899 max_conns=1;\n}\n\nserver {/' "$SITE_CONF"
 
 # 替换所有 proxy_pass 为使用 upstream
 sed -i 's|proxy_pass http://127.0.0.1:9899/health;|proxy_pass http://ocr_backend/health;|g' "$SITE_CONF"
