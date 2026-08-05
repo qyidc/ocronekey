@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =====================================================
-# OCR 服务一键部署脚本 v2.3.3
+# OCR 服务一键部署脚本 v2.4.0
 # 仓库: https://github.com/qyidc/ocronekey
 # 用法:
 #   菜单模式:   curl -fsSL url | bash
 #   非交互模式: bash ocronkey.sh --domain ocr.example.com --email admin@example.com --apikey xxx -y
 # =====================================================
 
-VERSION="2.3.3"
+VERSION="2.4.0"
 
 # Fix: curl|bash 管道模式下，交互 read 从 /dev/tty 读取
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -376,6 +376,11 @@ AUTHMAP
 
     cat >> "$SITE_CONF" <<BASESERVER
 
+# 串行化后端请求 — 1C1G VPS 一次只处理一张图
+upstream ocr_backend {
+    server 127.0.0.1:9899 max_conns=1;
+}
+
 server {
     listen 80;
     server_name $DOMAIN;
@@ -409,7 +414,7 @@ BASESERVER
 
     # /health 不校验 API Key
     location = /health {
-        proxy_pass http://127.0.0.1:9899/health;
+        proxy_pass http://ocr_backend/health;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -420,7 +425,7 @@ BASESERVER
         if (\$api_auth_ok = 0) {
             return 401 '{"error":"Invalid or missing API Key"}';
         }
-        proxy_pass http://127.0.0.1:9899;
+        proxy_pass http://ocr_backend;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -435,7 +440,7 @@ AUTHLOCATION
         cat >> "$SITE_CONF" <<NOMALLLOCATION
 
     location / {
-        proxy_pass http://127.0.0.1:9899;
+        proxy_pass http://ocr_backend;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -685,7 +690,7 @@ server {
     }
 
     location = /health {
-        proxy_pass http://127.0.0.1:9899/health;
+        proxy_pass http://ocr_backend/health;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -696,7 +701,7 @@ server {
         if (\$api_auth_ok = 0) {
             return 401 '{"error":"Invalid or missing API Key"}';
         }
-        proxy_pass http://127.0.0.1:9899;
+        proxy_pass http://ocr_backend;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -743,7 +748,7 @@ server {
     }
 
     location / {
-        proxy_pass http://127.0.0.1:9899;
+        proxy_pass http://ocr_backend;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
