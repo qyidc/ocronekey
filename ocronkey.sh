@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.4"
+SCRIPT_VERSION="3.1.5"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -525,8 +525,16 @@ while true; do
     echolog "处理: task=$TASK_ID doc=$DOC_ID page=$PAGE_NUM"
 
     # 2. 下载图片到文件（避免大 base64 占满内存）
-    IMG_FILE="$TEMP_DIR/task_${TASK_ID}.jpg"
-    if ! curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
+    IMG_DIR="$TEMP_DIR/images"
+    mkdir -p "$IMG_DIR"
+    IMG_FILE="$IMG_DIR/task_${TASK_ID}.jpg"
+    CACHED_IMG="$IMG_DIR/task_${TASK_ID}_cached.jpg"
+
+    # 先检查缓存（Worker 可能在首次下载后删除了 R2 图片）
+    if [ -f "$CACHED_IMG" ]; then
+        cp "$CACHED_IMG" "$IMG_FILE"
+        echolog "  使用缓存图片"
+    elif ! curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
         --max-time 30 \
         "$BASE_URL/api/ocr-tasks/$TASK_ID/image" -o "$IMG_FILE" 2>/dev/null; then
         echolog "  ERROR: 下载图片失败"
@@ -534,8 +542,23 @@ while true; do
             -H "Content-Type: application/json" \
             -d '{"error":"下载图片失败"}' \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-        rm -f "$IMG_FILE"
         continue
+    else
+        # 校验是否是真实图片（防止 Worker 返回 JSON 错误）
+        MAGIC_BYTES=$(head -c 4 "$IMG_FILE" | od -An -tx1 | tr -d ' ')
+        if [ "$MAGIC_BYTES" = "ffd8ffe0" ] || [ "$MAGIC_BYTES" = "ffd8ffe1" ] \
+            || [ "$MAGIC_BYTES" = "89504e47" ] || [ "$MAGIC_BYTES" = "ffd8ffdb" ] ; then
+            cp "$IMG_FILE" "$CACHED_IMG"   # 仅真图才缓存
+        else
+            CONTENT_PREVIEW=$(head -c 100 "$IMG_FILE")
+            echolog "  ERROR: 下载的不是图片 (magic=$MAGIC_BYTES preview=$CONTENT_PREVIEW)"
+            curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                -H "Content-Type: application/json" \
+                -d '{"error":"Worker返回的不是图片(可能已删除)"}' \
+                "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+            rm -f "$IMG_FILE"
+            continue
+        fi
     fi
 
     # 3. 用 python3 构造 JSON 请求体 -> 临时文件 (绕过 shell ARG_MAX 限制)
@@ -545,7 +568,7 @@ import json, base64, sys
 try:
     with open('$IMG_FILE', 'rb') as f:
         img_b64 = base64.b64encode(f.read()).decode()
-    body = {'data': img_b64}
+    body = {'image': img_b64}
     with open('$REQ_FILE', 'w') as f:
         json.dump(body, f)
 except Exception as e:
@@ -623,6 +646,7 @@ except Exception:
             -d "{\"text\":$ESCAPED_TEXT}" \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
         echolog "  完成: task=$TASK_ID, chars=${#OCR_TEXT}"
+        rm -f "$CACHED_IMG"
     else
         echolog "  无文字: task=$TASK_ID"
         curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
