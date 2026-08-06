@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.2"
+SCRIPT_VERSION="3.1.3"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -538,42 +538,64 @@ while true; do
         continue
     fi
 
-    # 3. base64 编码
-    BASE64_IMG=$(base64 -w 0 "$IMG_FILE" 2>/dev/null || base64 "$IMG_FILE" 2>/dev/null)
+    # 3. 用 python3 构造 JSON 请求体 -> 临时文件 (绕过 shell ARG_MAX 限制)
+    REQ_FILE="$TEMP_DIR/task_${TASK_ID}_req.json"
+    python3 -c "
+import json, base64, sys
+try:
+    with open('$IMG_FILE', 'rb') as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    # 尝试 image 字段, 兼容 data 字段的旧格式
+    body = {'image': img_b64}
+    with open('$REQ_FILE', 'w') as f:
+        json.dump(body, f)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null
     rm -f "$IMG_FILE"
 
-    if [ -z "$BASE64_IMG" ]; then
-        echolog "  ERROR: base64 编码失败"
+    if [ ! -s "$REQ_FILE" ]; then
+        echolog "  ERROR: JSON 构造失败"
         curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
             -H "Content-Type: application/json" \
-            -d '{"error":"base64 编码失败"}' \
+            -d '{"error":"编码失败"}' \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        rm -f "$REQ_FILE"
         continue
     fi
 
-    # 4. 本地 OCR 识别（不限时）
+    # 4. 本地 OCR 识别（不限时, -d @file 无大小限制）
     echolog "  开始 OCR..."
     OCR_RESP=$(curl -s --max-time 300 \
         -X POST "$PADDLE_URL/general/base64" \
         -H "Content-Type: application/json" \
-        -d "{\"image\":\"$BASE64_IMG\"}" 2>/dev/null) || {
+        -d "@$REQ_FILE" 2>/dev/null) || {
         echolog "  ERROR: PaddleOCR 不可用"
         curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
             -H "Content-Type: application/json" \
             -d '{"error":"PaddleOCR 服务不可用"}' \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        rm -f "$REQ_FILE"
         continue
     }
+    rm -f "$REQ_FILE"
 
     # 5. 提取识别文本（解析 rec_texts 字段）
     OCR_TEXT=$(echo "$OCR_RESP" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    texts = []
-    for r in data.get('results', []):
-        texts.extend(r.get('rec_texts', []))
-    print('\n'.join(texts))
+    # 如果有 detail/error 字段说明请求失败
+    if 'detail' in data:
+        print('', end='')
+    else:
+        texts = []
+        results = data.get('results') or data.get('data', [])
+        if isinstance(results, list):
+            for r in results:
+                if isinstance(r, dict):
+                    texts.extend(r.get('rec_texts', []))
+        print('\n'.join(texts))
 except Exception:
     pass
 " 2>/dev/null)
