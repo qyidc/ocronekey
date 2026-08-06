@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.3"
+SCRIPT_VERSION="3.1.4"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -545,8 +545,7 @@ import json, base64, sys
 try:
     with open('$IMG_FILE', 'rb') as f:
         img_b64 = base64.b64encode(f.read()).decode()
-    # 尝试 image 字段, 兼容 data 字段的旧格式
-    body = {'image': img_b64}
+    body = {'data': img_b64}
     with open('$REQ_FILE', 'w') as f:
         json.dump(body, f)
 except Exception as e:
@@ -564,20 +563,36 @@ except Exception as e:
         continue
     fi
 
-    # 4. 本地 OCR 识别（不限时, -d @file 无大小限制）
+    # 4. 本地 OCR 识别（不限时, -d @file 无大小限制, 重试3次）
     echolog "  开始 OCR..."
-    OCR_RESP=$(curl -s --max-time 300 \
-        -X POST "$PADDLE_URL/general/base64" \
-        -H "Content-Type: application/json" \
-        -d "@$REQ_FILE" 2>/dev/null) || {
-        echolog "  ERROR: PaddleOCR 不可用"
+    OCR_OK=false
+    for attempt in 1 2 3; do
+        OCR_ERR_FILE="$TEMP_DIR/task_${TASK_ID}_err.txt"
+        OCR_RESP=$(curl -s --max-time 300 -S \
+            -X POST "$PADDLE_URL/general/base64" \
+            -H "Content-Type: application/json" \
+            -d "@$REQ_FILE" 2>"$OCR_ERR_FILE")
+        CURL_EXIT=$?
+        if [ $CURL_EXIT -eq 0 ]; then
+            OCR_OK=true
+            rm -f "$OCR_ERR_FILE"
+            break
+        fi
+        CURL_ERR_MSG=$(head -c 200 "$OCR_ERR_FILE" 2>/dev/null)
+        [ $attempt -lt 3 ] && echolog "    retry $attempt: curl_exit=$CURL_EXIT err=$CURL_ERR_MSG"
+        rm -f "$OCR_ERR_FILE"
+        sleep 5
+    done
+
+    if [ "$OCR_OK" != "true" ]; then
+        echolog "  ERROR: PaddleOCR 不可用 (curl=$CURL_EXIT: $CURL_ERR_MSG)"
         curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
             -H "Content-Type: application/json" \
             -d '{"error":"PaddleOCR 服务不可用"}' \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
         rm -f "$REQ_FILE"
         continue
-    }
+    fi
     rm -f "$REQ_FILE"
 
     # 5. 提取识别文本（解析 rec_texts 字段）
