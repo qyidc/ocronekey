@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.5"
+SCRIPT_VERSION="3.1.6"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -568,7 +568,7 @@ import json, base64, sys
 try:
     with open('$IMG_FILE', 'rb') as f:
         img_b64 = base64.b64encode(f.read()).decode()
-    body = {'image': img_b64}
+    body = {'base64_img': img_b64}
     with open('$REQ_FILE', 'w') as f:
         json.dump(body, f)
 except Exception as e:
