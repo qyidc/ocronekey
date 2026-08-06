@@ -654,7 +654,7 @@ SERVICEEOF
 
     systemctl daemon-reload
     systemctl enable ocr-worker
-    systemctl start ocr-worker
+    systemctl restart ocr-worker
 
     echo ""
     echo -e "${GREEN}========================================${NC}"
