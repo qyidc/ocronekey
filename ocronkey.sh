@@ -732,17 +732,27 @@ except Exception:
 # ─── 主循环: 事件驱动 ────────────────────────────────
 echolog "=== OCR Worker v4.0 启动 (事件驱动模式) ==="
 echolog "Worker: $BASE_URL"
-echolog "监听 127.0.0.1:9898 等待 Worker 触发"
 
-# 启动时先处理积压任务（防止触发请求在启动期间丢失）
+TRIGGER="$TEMP_DIR/wake_trigger"
+
+# 后台持久监听 wake 请求（fork 模式，始终可响应）
+socat TCP-LISTEN:9898,bind=127.0.0.1,reuseaddr,fork \
+    SYSTEM:'touch '"$TRIGGER"'; printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"' 2>/dev/null &
+SOCAT_PID=$!
+echolog "Wake 端点就绪 (pid=$SOCAT_PID)"
+
+# 启动时先处理积压
 echolog "检查积压任务..."
 process_batch
 
 while true; do
-    echolog "休眠中，等待 Worker 访问 /worker/wake..."
-    socat TCP-LISTEN:9898,bind=127.0.0.1,reuseaddr \
-        EXEC:'printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"' 2>/dev/null || true
-    echolog "=== 收到触发信号 ==="
+    echolog "休眠中，等待 Worker 触发..."
+    # 等待触发信号（最长 60s，超时后也检查一次以防遗漏）
+    for _ in $(seq 1 12); do
+        [ -f "$TRIGGER" ] && break
+        sleep 5
+    done
+    rm -f "$TRIGGER"
     process_batch
 done
 WORKEREOF
@@ -774,35 +784,55 @@ SERVICEEOF
     get_nginx_dirs
     SITE_CONF="$SITES_AVAILABLE/ocr-$DOMAIN.conf"
     if [ -f "$SITE_CONF" ]; then
-        python3 -c "
-import re, sys
-secret = '''$WORKER_SECRET'''
-conf = '$SITE_CONF'
-with open(conf, 'r') as f:
-    c = f.read()
-# 移除已有的 wake location 和 worker_auth_ok map（避免重复）
-c = re.sub(r'\n\s*location = /worker/wake \{.*?\n\s*\}', '', c, flags=re.DOTALL)
-c = re.sub(r'\nmap \\\$http_x_worker_secret.*?\n\}', '', c, flags=re.DOTALL)
-# 插入 map（在 upstream 前面）
-m = '\nmap \$http_x_worker_secret \$worker_auth_ok {\n    default     0;\n    \"' + secret + '\"   1;\n}\n'
-c = c.replace('\nupstream ocr_backend {', m + '\nupstream ocr_backend {', 1)
-# 插入 wake location（在 acme-challenge 后面）
-w = '''\n    location = /worker/wake {
-        if (\$worker_auth_ok = 0) {
+        if grep -q 'worker/wake' "$SITE_CONF" && grep -q 'worker_auth_ok' "$SITE_CONF"; then
+            echo -e "${GREEN}  /worker/wake 触发端点已存在，跳过。${NC}"
+        else
+            # 先清理可能残留的无效 worker/wake 相关行
+            sed -i '/location = \/worker\/wake/,/}/d' "$SITE_CONF"
+            sed -i '/worker_auth_ok/d' "$SITE_CONF"
+            # 插入 map 块（在 upstream 前面）
+            sed -i '/^upstream ocr_backend {/i map $http_x_worker_secret $worker_auth_ok {\n    default     0;\n    "'"$WORKER_SECRET"'"   1;\n}' "$SITE_CONF"
+            # 插入 wake location（在 /health location 前面）
+            WAKE_BLOCK=$(cat <<'WAKEEND'
+    location = /worker/wake {
+        if ($worker_auth_ok = 0) {
             return 403;
         }
         proxy_pass http://127.0.0.1:9898;
         proxy_read_timeout 5;
-    }'''
-c = re.sub(r'(location \^~ /\.well-known/acme-challenge/ \{.*?\n    \})', r'\1' + w, c, flags=re.DOTALL)
-with open(conf, 'w') as f:
-    f.write(c)
-" 2>/dev/null
-        if nginx -t 2>/dev/null; then
-            systemctl reload nginx
-            echo -e "${GREEN}  /worker/wake 触发端点已配置 (带 Secret 鉴权)。${NC}"
-        else
-            echo -e "${YELLOW}  Nginx 配置有误，请手动检查 $SITE_CONF${NC}"
+    }
+WAKEEND
+)
+            # 用 awk 在 location = /health 之前插入（比 sed 更可靠处理多行）
+            awk -v block="$WAKE_BLOCK" '
+                /location = \/health/ && !done {
+                    print block
+                    done=1
+                }
+                { print }
+            ' "$SITE_CONF" > "${SITE_CONF}.tmp" && mv "${SITE_CONF}.tmp" "$SITE_CONF"
+            # 如果文件里没有 /health location，则插入到第一个 server 块的 ssl_session_timeout 后面
+            if ! grep -q 'location = /worker/wake' "$SITE_CONF"; then
+                awk -v block="$WAKE_BLOCK" '
+                    /ssl_session_timeout/ && !done {
+                        print $0
+                        print block
+                        done=1
+                        next
+                    }
+                    { print }
+                ' "$SITE_CONF" > "${SITE_CONF}.tmp" && mv "${SITE_CONF}.tmp" "$SITE_CONF"
+            fi
+            if nginx -t 2>/dev/null; then
+                systemctl reload nginx
+                echo -e "${GREEN}  /worker/wake 触发端点已配置 (带 Secret 鉴权)。${NC}"
+            else
+                echo -e "${YELLOW}  Nginx 配置有误，请手动检查 $SITE_CONF${NC}"
+                # 回滚：删除刚才插入的块
+                sed -i '/location = \/worker\/wake/,/}/d' "$SITE_CONF"
+                sed -i '/worker_auth_ok/d' "$SITE_CONF"
+                nginx -t && systemctl reload nginx && echo -e "${YELLOW}  已回滚 Nginx 配置，Worker 同步继续……${NC}" || true
+            fi
         fi
     fi
 
