@@ -463,9 +463,9 @@ config_sync() {
 
     # 验证连接
     echo -e "${BLUE}测试 Worker 连接...${NC}"
-    TEST_RESP=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 \
+    TEST_RESP=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
         -H "X-Worker-Secret: $WORKER_SECRET" \
-        "$BASE_URL/api/ocr-tasks/next" 2>&1)
+        "$BASE_URL/api/ocr-tasks/next" 2>/dev/null)
     if [ "$TEST_RESP" = "200" ] || [ "$TEST_RESP" = "204" ] || [ "$TEST_RESP" = "404" ]; then
         # 200=有任务, 204/404=无任务, 都是正常连接
         echo -e "${GREEN}  Worker 连接成功 (HTTP $TEST_RESP)。${NC}"
