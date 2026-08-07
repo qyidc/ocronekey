@@ -735,11 +735,31 @@ echolog "Worker: $BASE_URL"
 
 TRIGGER="$TEMP_DIR/wake_trigger"
 
-# 后台持久监听 wake 请求（fork 模式，始终可响应）
-socat TCP-LISTEN:9898,bind=127.0.0.1,reuseaddr,fork \
-    SYSTEM:'touch '"$TRIGGER"'; printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"' 2>/dev/null &
-SOCAT_PID=$!
-echolog "Wake 端点就绪 (pid=$SOCAT_PID)"
+# 后台持久监听 wake 请求（python HTTP 响应，比 socat 更可靠）
+python3 -c "
+import socket, os, time
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(('127.0.0.1', 9898))
+    sock.listen(5)
+except Exception as e:
+    pass  # 端口已被占用则退出
+while True:
+    try:
+        conn, _ = sock.accept()
+        try:
+            conn.recv(4096)
+            conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK')
+        except:
+            pass
+        finally:
+            conn.close()
+        os.system('touch '"$TRIGGER"'')
+    except:
+        time.sleep(1)
+" 2>/dev/null &
+echolog "Wake 端点就绪 (python, 端口 9898)"
 
 # 启动时先处理积压
 echolog "检查积压任务..."
