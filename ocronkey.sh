@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="4.0.0"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -364,6 +364,12 @@ server {
         root $WEBROOT;
         default_type text/plain;
     }
+
+    # Worker 触发端点 — 零轮询模式
+    location = /worker/wake {
+        proxy_pass http://127.0.0.1:9898;
+        proxy_read_timeout 5;
+    }
 UPSTREAM
 
     if [ -n "$APIKEY" ]; then
@@ -455,9 +461,9 @@ config_sync() {
     WORKER_SECRET="${WORKER_SECRET%$'\r'}"
     [ -z "$WORKER_SECRET" ] && { echo -e "${RED}Secret 不能为空${NC}"; return; }
 
-    iread -p "轮询间隔 (秒, 默认 5): " POLL_INTERVAL
+    iread -p "备用轮询间隔 (秒, 默认 60, 仅降级时使用): " POLL_INTERVAL
     POLL_INTERVAL="${POLL_INTERVAL%$'\r'}"
-    [ -z "$POLL_INTERVAL" ] && POLL_INTERVAL=5
+    [ -z "$POLL_INTERVAL" ] && POLL_INTERVAL=60
 
     echo ""
 
@@ -488,10 +494,11 @@ CONF
     # 生成 Worker 脚本
     cat > /opt/ocr/ocr_worker.sh << 'WORKEREOF'
 #!/bin/bash
-# OCR 同步守护进程 — 轮询 Worker API → 本地 OCR → 回传结果
-# 由 ocronkey.sh v3.1 生成
+# OCR 同步守护进程 v4.0 — 事件驱动模式
+# Worker 触发 → 批量处理所有任务 → 休眠等待下次触发
+# 由 ocronkey.sh 生成
 
-set -euo pipefail
+set -uo pipefail
 source /opt/ocr/ocr_worker.conf
 
 PADDLE_URL="http://127.0.0.1:9899"
@@ -505,80 +512,70 @@ echolog() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
-echolog "=== OCR Worker v3.2 启动 ==="
-echolog "Worker: $BASE_URL"
-echolog "空闲轮询间隔: ${POLL_INTERVAL}s | 活跃时连续处理"
+IMG_DIR="$TEMP_DIR/images"
+mkdir -p "$IMG_DIR"
 
-IDLE_EMPTY=0      # 连续空轮询计数
-MAX_FAST_CHECKS=3  # 处理完一批后快速探测次数
+# ─── 批量处理所有待处理任务 ─────────────────────────
+process_batch() {
+    local batch_count=0
 
-while true; do
-    # 1. 拉取下一个待处理任务
-    TASK_JSON=$(curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
-        "$BASE_URL/api/ocr-tasks/next" 2>/dev/null) || {
-        echolog "WARN: 网络异常, 5s 后重试"
-        sleep 5
-        continue
-    }
+    while true; do
+        TASK_JSON=$(curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
+            "$BASE_URL/api/ocr-tasks/next" 2>/dev/null) || {
+            echolog "WARN: 网络异常, 暂停本轮处理"
+            break
+        }
 
-    TASK_ID=$(echo "$TASK_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+        TASK_ID=$(echo "$TASK_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
 
-    if [ -z "$TASK_ID" ]; then
-        IDLE_EMPTY=$((IDLE_EMPTY + 1))
-        if [ "$IDLE_EMPTY" -le "$MAX_FAST_CHECKS" ]; then
-            sleep 2   # 刚处理完一批，快速探测是否有新任务
-        else
-            sleep "$POLL_INTERVAL"  # 空闲模式，慢速轮询
+        if [ -z "$TASK_ID" ]; then
+            break   # 队列已空
         fi
-        continue
-    fi
 
-    IDLE_EMPTY=0     # 有任务，重置空闲计数 → 活跃模式
-    DOC_ID=$(echo "$TASK_JSON" | grep -o '"documentId":[0-9]*' | head -1 | grep -o '[0-9]*')
-    PAGE_NUM=$(echo "$TASK_JSON" | grep -o '"pageNum":[0-9]*' | head -1 | grep -o '[0-9]*')
+        batch_count=$((batch_count + 1))
+        DOC_ID=$(echo "$TASK_JSON" | grep -o '"documentId":[0-9]*' | head -1 | grep -o '[0-9]*')
+        PAGE_NUM=$(echo "$TASK_JSON" | grep -o '"pageNum":[0-9]*' | head -1 | grep -o '[0-9]*')
 
-    echolog "处理: task=$TASK_ID doc=$DOC_ID page=$PAGE_NUM"
+        echolog "处理: task=$TASK_ID doc=$DOC_ID page=$PAGE_NUM"
 
-    # 2. 下载图片到文件（避免大 base64 占满内存）
-    IMG_DIR="$TEMP_DIR/images"
-    mkdir -p "$IMG_DIR"
-    IMG_FILE="$IMG_DIR/task_${TASK_ID}.jpg"
-    CACHED_IMG="$IMG_DIR/task_${TASK_ID}_cached.jpg"
+        # 2. 下载图片到文件（避免大 base64 占满内存）
+        IMG_FILE="$IMG_DIR/task_${TASK_ID}.jpg"
+        CACHED_IMG="$IMG_DIR/task_${TASK_ID}_cached.jpg"
 
-    # 先检查缓存（Worker 可能在首次下载后删除了 R2 图片）
-    if [ -f "$CACHED_IMG" ]; then
-        cp "$CACHED_IMG" "$IMG_FILE"
-        echolog "  使用缓存图片"
-    elif ! curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
-        --max-time 30 \
-        "$BASE_URL/api/ocr-tasks/$TASK_ID/image" -o "$IMG_FILE" 2>/dev/null; then
-        echolog "  ERROR: 下载图片失败"
-        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-            -H "Content-Type: application/json" \
-            -d '{"error":"下载图片失败"}' \
-            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-        continue
-    else
-        # 校验是否是真实图片（防止 Worker 返回 JSON 错误）
-        MAGIC_BYTES=$(head -c 4 "$IMG_FILE" | od -An -tx1 | tr -d ' ')
-        if [ "$MAGIC_BYTES" = "ffd8ffe0" ] || [ "$MAGIC_BYTES" = "ffd8ffe1" ] \
-            || [ "$MAGIC_BYTES" = "89504e47" ] || [ "$MAGIC_BYTES" = "ffd8ffdb" ] ; then
-            cp "$IMG_FILE" "$CACHED_IMG"   # 仅真图才缓存
-        else
-            CONTENT_PREVIEW=$(head -c 100 "$IMG_FILE")
-            echolog "  ERROR: 下载的不是图片 (magic=$MAGIC_BYTES preview=$CONTENT_PREVIEW)"
+        # 先检查缓存（Worker 可能在首次下载后删除了 R2 图片）
+        if [ -f "$CACHED_IMG" ]; then
+            cp "$CACHED_IMG" "$IMG_FILE"
+            echolog "  使用缓存图片"
+        elif ! curl -sf -H "X-Worker-Secret: $WORKER_SECRET" \
+            --max-time 30 \
+            "$BASE_URL/api/ocr-tasks/$TASK_ID/image" -o "$IMG_FILE" 2>/dev/null; then
+            echolog "  ERROR: 下载图片失败"
             curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
                 -H "Content-Type: application/json" \
-                -d '{"error":"Worker返回的不是图片(可能已删除)"}' \
+                -d '{"error":"下载图片失败"}' \
                 "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-            rm -f "$IMG_FILE"
             continue
+        else
+            # 校验是否是真实图片（防止 Worker 返回 JSON 错误）
+            MAGIC_BYTES=$(head -c 4 "$IMG_FILE" | od -An -tx1 | tr -d ' ')
+            if [ "$MAGIC_BYTES" = "ffd8ffe0" ] || [ "$MAGIC_BYTES" = "ffd8ffe1" ] \
+                || [ "$MAGIC_BYTES" = "89504e47" ] || [ "$MAGIC_BYTES" = "ffd8ffdb" ] ; then
+                cp "$IMG_FILE" "$CACHED_IMG"   # 仅真图才缓存
+            else
+                CONTENT_PREVIEW=$(head -c 100 "$IMG_FILE")
+                echolog "  ERROR: 下载的不是图片 (magic=$MAGIC_BYTES preview=$CONTENT_PREVIEW)"
+                curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                    -H "Content-Type: application/json" \
+                    -d '{"error":"Worker返回的不是图片(可能已删除)"}' \
+                    "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+                rm -f "$IMG_FILE"
+                continue
+            fi
         fi
-    fi
 
-    # 3. 用 python3 构造 JSON 请求体 -> 临时文件 (绕过 shell ARG_MAX 限制)
-    REQ_FILE="$TEMP_DIR/task_${TASK_ID}_req.json"
-    python3 -c "
+        # 3. 用 python3 构造 JSON 请求体 -> 临时文件 (绕过 shell ARG_MAX 限制)
+        REQ_FILE="$TEMP_DIR/task_${TASK_ID}_req.json"
+        python3 -c "
 import json, base64, sys
 try:
     with open('$IMG_FILE', 'rb') as f:
@@ -589,56 +586,56 @@ try:
 except Exception as e:
     sys.exit(1)
 " 2>/dev/null
-    rm -f "$IMG_FILE"
+        rm -f "$IMG_FILE"
 
-    if [ ! -s "$REQ_FILE" ]; then
-        echolog "  ERROR: JSON 构造失败"
-        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-            -H "Content-Type: application/json" \
-            -d '{"error":"编码失败"}' \
-            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-        rm -f "$REQ_FILE"
-        continue
-    fi
-
-    # 4. 本地 OCR 识别（不限时, -d @file 无大小限制, 重试3次）
-    echolog "  开始 OCR..."
-    OCR_OK=false
-    for attempt in 1 2 3; do
-        OCR_ERR_FILE="$TEMP_DIR/task_${TASK_ID}_err.txt"
-        OCR_RESP=$(curl -s --max-time 300 -S \
-            -X POST "$PADDLE_URL/general/base64" \
-            -H "Content-Type: application/json" \
-            -d "@$REQ_FILE" 2>"$OCR_ERR_FILE")
-        CURL_EXIT=$?
-        if [ $CURL_EXIT -eq 0 ]; then
-            OCR_OK=true
-            rm -f "$OCR_ERR_FILE"
-            break
+        if [ ! -s "$REQ_FILE" ]; then
+            echolog "  ERROR: JSON 构造失败"
+            curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                -H "Content-Type: application/json" \
+                -d '{"error":"编码失败"}' \
+                "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+            rm -f "$REQ_FILE"
+            continue
         fi
-        CURL_ERR_MSG=$(head -c 200 "$OCR_ERR_FILE" 2>/dev/null)
-        [ $attempt -lt 3 ] && echolog "    retry $attempt: curl_exit=$CURL_EXIT err=$CURL_ERR_MSG"
-        rm -f "$OCR_ERR_FILE"
-        sleep 5
-    done
 
-    if [ "$OCR_OK" != "true" ]; then
-        echolog "  ERROR: PaddleOCR 不可用 (curl=$CURL_EXIT: $CURL_ERR_MSG)"
-        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-            -H "Content-Type: application/json" \
-            -d '{"error":"PaddleOCR 服务不可用"}' \
-            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        # 4. 本地 OCR 识别（不限时, -d @file 无大小限制, 重试3次）
+        echolog "  开始 OCR..."
+        OCR_OK=false
+        OCR_ERR_MSG=""
+        for attempt in 1 2 3; do
+            OCR_ERR_FILE="$TEMP_DIR/task_${TASK_ID}_err.txt"
+            OCR_RESP=$(curl -s --max-time 300 -S \
+                -X POST "$PADDLE_URL/general/base64" \
+                -H "Content-Type: application/json" \
+                -d "@$REQ_FILE" 2>"$OCR_ERR_FILE")
+            CURL_EXIT=$?
+            if [ $CURL_EXIT -eq 0 ]; then
+                OCR_OK=true
+                rm -f "$OCR_ERR_FILE"
+                break
+            fi
+            OCR_ERR_MSG=$(head -c 200 "$OCR_ERR_FILE" 2>/dev/null)
+            [ $attempt -lt 3 ] && echolog "    retry $attempt: curl_exit=$CURL_EXIT err=$OCR_ERR_MSG"
+            rm -f "$OCR_ERR_FILE"
+            sleep 5
+        done
+
+        if [ "$OCR_OK" != "true" ]; then
+            echolog "  ERROR: PaddleOCR 不可用 (curl=$CURL_EXIT: $OCR_ERR_MSG)"
+            curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                -H "Content-Type: application/json" \
+                -d '{"error":"PaddleOCR 服务不可用"}' \
+                "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+            rm -f "$REQ_FILE"
+            continue
+        fi
         rm -f "$REQ_FILE"
-        continue
-    fi
-    rm -f "$REQ_FILE"
 
-    # 5. 提取识别文本（解析 rec_texts 字段）
-    OCR_TEXT=$(echo "$OCR_RESP" | python3 -c "
+        # 5. 提取识别文本（解析 rec_texts 字段）
+        OCR_TEXT=$(echo "$OCR_RESP" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    # 如果有 detail/error 字段说明请求失败
     if 'detail' in data:
         print('', end='')
     else:
@@ -653,22 +650,21 @@ except Exception:
     pass
 " 2>/dev/null)
 
-    if [ -n "$OCR_TEXT" ]; then
-        # 用 python3 安全转义 JSON
-        ESCAPED_TEXT=$(echo "$OCR_TEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-            -H "Content-Type: application/json" \
-            -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT}}" \
-            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-        echolog "  完成: task=$TASK_ID, chars=${#OCR_TEXT}"
-        rm -f "$CACHED_IMG"
-    else
-        # 空结果重试一次（可能是 PaddleOCR 偶发抽风或图片质量问题）
-        if [ -s "$CACHED_IMG" ]; then
-            echolog "  首次OCR无文字，重试..."
-            cp "$CACHED_IMG" "$IMG_FILE"
-            REQ2_FILE="$TEMP_DIR/task_${TASK_ID}_req2.json"
-            python3 -c "
+        if [ -n "$OCR_TEXT" ]; then
+            ESCAPED_TEXT=$(echo "$OCR_TEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+            curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                -H "Content-Type: application/json" \
+                -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT}}" \
+                "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+            echolog "  完成: task=$TASK_ID, chars=${#OCR_TEXT}"
+            rm -f "$CACHED_IMG"
+        else
+            # 空结果重试一次
+            if [ -s "$CACHED_IMG" ]; then
+                echolog "  首次OCR无文字，重试..."
+                cp "$CACHED_IMG" "$IMG_FILE"
+                REQ2_FILE="$TEMP_DIR/task_${TASK_ID}_req2.json"
+                python3 -c "
 import json, base64, sys
 try:
     with open('$IMG_FILE', 'rb') as f:
@@ -679,16 +675,16 @@ try:
 except Exception as e:
     sys.exit(1)
 " 2>/dev/null
-            rm -f "$IMG_FILE"
+                rm -f "$IMG_FILE"
 
-            if [ -s "$REQ2_FILE" ]; then
-                OCR_RESP2=$(curl -s --max-time 300 -S \
-                    -X POST "$PADDLE_URL/general/base64" \
-                    -H "Content-Type: application/json" \
-                    -d "@$REQ2_FILE" 2>/dev/null)
-                rm -f "$REQ2_FILE"
+                if [ -s "$REQ2_FILE" ]; then
+                    OCR_RESP2=$(curl -s --max-time 300 -S \
+                        -X POST "$PADDLE_URL/general/base64" \
+                        -H "Content-Type: application/json" \
+                        -d "@$REQ2_FILE" 2>/dev/null)
+                    rm -f "$REQ2_FILE"
 
-                OCR_TEXT2=$(echo "$OCR_RESP2" | python3 -c "
+                    OCR_TEXT2=$(echo "$OCR_RESP2" | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -706,27 +702,47 @@ except Exception:
     pass
 " 2>/dev/null)
 
-                if [ -n "$OCR_TEXT2" ]; then
-                    ESCAPED_TEXT=$(echo "$OCR_TEXT2" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-                    curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-                        -H "Content-Type: application/json" \
-                        -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT2}}" \
-                        "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-                    echolog "  重试成功: task=$TASK_ID, chars=${#OCR_TEXT2}"
-                    rm -f "$CACHED_IMG"
-                    continue
+                    if [ -n "$OCR_TEXT2" ]; then
+                        ESCAPED_TEXT=$(echo "$OCR_TEXT2" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+                        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT2}}" \
+                            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+                        echolog "  重试成功: task=$TASK_ID, chars=${#OCR_TEXT2}"
+                        rm -f "$CACHED_IMG"
+                        continue
+                    fi
                 fi
             fi
-        fi
 
-        # 重试后仍为空 → 标记为空白页
-        echolog "  空白页: task=$TASK_ID"
-        curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
-            -H "Content-Type: application/json" \
-            -d '{"error":"empty_page","text":""}' \
-            "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-        rm -f "$CACHED_IMG"
-    fi
+            # 重试后仍为空 → 标记为空白页
+            echolog "  空白页: task=$TASK_ID"
+            curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                -H "Content-Type: application/json" \
+                -d '{"error":"empty_page","text":""}' \
+                "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+            rm -f "$CACHED_IMG"
+        fi
+    done
+
+    echolog "本轮处理完成: ${batch_count} 个任务"
+}
+
+# ─── 主循环: 事件驱动 ────────────────────────────────
+echolog "=== OCR Worker v4.0 启动 (事件驱动模式) ==="
+echolog "Worker: $BASE_URL"
+echolog "监听 127.0.0.1:9898 等待 Worker 触发"
+
+# 启动时先处理积压任务（防止触发请求在启动期间丢失）
+echolog "检查积压任务..."
+process_batch
+
+while true; do
+    echolog "休眠中，等待 Worker 访问 /worker/wake..."
+    socat TCP-LISTEN:9898,bind=127.0.0.1,reuseaddr \
+        EXEC:'printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"' 2>/dev/null || true
+    echolog "=== 收到触发信号 ==="
+    process_batch
 done
 WORKEREOF
     chmod +x /opt/ocr/ocr_worker.sh
@@ -753,6 +769,27 @@ SERVICEEOF
     systemctl enable ocr-worker
     systemctl restart ocr-worker
 
+    # 确保 Nginx 有 /worker/wake 触发端点
+    get_nginx_dirs
+    SITE_CONF="$SITES_AVAILABLE/ocr-$DOMAIN.conf"
+    if [ -f "$SITE_CONF" ] && ! grep -q '/worker/wake' "$SITE_CONF" 2>/dev/null; then
+        echolog_silent() { :; }
+        # 在 acme-challenge location 后面插入 wake 端点
+        sed -i '/location \^~ \/\.well-known\/acme-challenge\/ {/,/}/{
+            /}/a\
+\
+    # Worker 触发端点 — 零轮询模式\
+    location = /worker/wake {\
+        proxy_pass http://127.0.0.1:9898;\
+        proxy_read_timeout 5;\
+    }
+        }' "$SITE_CONF" 2>/dev/null
+        if nginx -t 2>/dev/null; then
+            systemctl reload nginx
+            echo -e "${GREEN}  /worker/wake 触发端点已添加。${NC}"
+        fi
+    fi
+
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  同步配置完成！${NC}"
@@ -762,13 +799,17 @@ SERVICEEOF
     echo -e "  配置文件:     /opt/ocr/ocr_worker.conf"
     echo -e "  Worker 脚本:  /opt/ocr/ocr_worker.sh"
     echo -e "  日志文件:     /var/log/ocr_worker.log"
-    echo -e "  轮询间隔:     ${POLL_INTERVAL}s"
+    echo -e "  模式:         事件驱动 (零轮询, Worker 主动触发)"
+    echo -e "  触发端点:      POST https://$DOMAIN/worker/wake"
     echo -e "  状态:         $(systemctl is-active ocr-worker 2>/dev/null)"
     echo ""
-    echo -e "${BLUE}Worker 端需要在 Cloudflare Worker 中实现三个端点:${NC}"
-    echo "  GET  ${BASE_URL}/api/ocr-tasks/next        → 返回下一个待处理任务"
-    echo "  GET  ${BASE_URL}/api/ocr-tasks/{id}/image  → 返回图片二进制"
-    echo "  POST ${BASE_URL}/api/ocr-tasks/{id}/result → 接收识别结果 {text} 或 {error}"
+    echo -e "${BLUE}Worker 端 (Cloudflare Worker) 需要实现:${NC}"
+    echo "  1) 有新任务时，POST 到触发端点唤醒 VPS:"
+    echo -e "     ${CYAN}POST https://$DOMAIN/worker/wake${NC}"
+    echo "  2) 已有的三个 API 端点 (不变):"
+    echo "     GET  ${BASE_URL}/api/ocr-tasks/next"
+    echo "     GET  ${BASE_URL}/api/ocr-tasks/{id}/image"
+    echo "     POST ${BASE_URL}/api/ocr-tasks/{id}/result"
     echo ""
 }
 
