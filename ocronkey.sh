@@ -758,7 +758,7 @@ while True:
         os.system('touch ${TRIGGER}')
     except:
         time.sleep(1)
-" 2>/dev/null &
+" >>"$LOG_FILE" 2>&1 &
 echolog "Wake 端点就绪 (python, 端口 9898)"
 
 # 启动时先处理积压
