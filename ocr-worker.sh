@@ -96,7 +96,7 @@ except: pass
     ESCAPED_TEXT=$(echo "$OCR_TEXT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
     curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
       -H "Content-Type: application/json" \
-      -d "{\"text\":$ESCAPED_TEXT}" \
+      -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT}}" \
       "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
     echo "$LOG_PREFIX 完成: task=$TASK_ID, chars=${#OCR_TEXT}"
   else
