@@ -102,9 +102,9 @@ except: pass
   else
     curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
       -H "Content-Type: application/json" \
-      -d "{\"error\":\"无识别结果\"}" \
+      -d "{\"error\":\"empty_page\",\"text\":\"\"}" \
       "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
-    echo "$LOG_PREFIX 无文字: task=$TASK_ID"
+    echo "$LOG_PREFIX 空白页: task=$TASK_ID"
   fi
 
 done

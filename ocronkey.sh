@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.6"
+SCRIPT_VERSION="3.1.7"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -648,11 +648,69 @@ except Exception:
         echolog "  完成: task=$TASK_ID, chars=${#OCR_TEXT}"
         rm -f "$CACHED_IMG"
     else
-        echolog "  无文字: task=$TASK_ID"
+        # 空结果重试一次（可能是 PaddleOCR 偶发抽风或图片质量问题）
+        if [ -s "$CACHED_IMG" ]; then
+            echolog "  首次OCR无文字，重试..."
+            cp "$CACHED_IMG" "$IMG_FILE"
+            REQ2_FILE="$TEMP_DIR/task_${TASK_ID}_req2.json"
+            python3 -c "
+import json, base64, sys
+try:
+    with open('$IMG_FILE', 'rb') as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    body = {'base64_img': img_b64}
+    with open('$REQ2_FILE', 'w') as f:
+        json.dump(body, f)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null
+            rm -f "$IMG_FILE"
+
+            if [ -s "$REQ2_FILE" ]; then
+                OCR_RESP2=$(curl -s --max-time 300 -S \
+                    -X POST "$PADDLE_URL/general/base64" \
+                    -H "Content-Type: application/json" \
+                    -d "@$REQ2_FILE" 2>/dev/null)
+                rm -f "$REQ2_FILE"
+
+                OCR_TEXT2=$(echo "$OCR_RESP2" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if 'detail' in data:
+        print('', end='')
+    else:
+        texts = []
+        results = data.get('results') or data.get('data', [])
+        if isinstance(results, list):
+            for r in results:
+                if isinstance(r, dict):
+                    texts.extend(r.get('rec_texts', []))
+        print('\n'.join(texts))
+except Exception:
+    pass
+" 2>/dev/null)
+
+                if [ -n "$OCR_TEXT2" ]; then
+                    ESCAPED_TEXT=$(echo "$OCR_TEXT2" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+                    curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"text\":$ESCAPED_TEXT,\"chars\":${#OCR_TEXT2}}" \
+                        "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+                    echolog "  重试成功: task=$TASK_ID, chars=${#OCR_TEXT2}"
+                    rm -f "$CACHED_IMG"
+                    continue
+                fi
+            fi
+        fi
+
+        # 重试后仍为空 → 标记为空白页
+        echolog "  空白页: task=$TASK_ID"
         curl -sf -X POST -H "X-Worker-Secret: $WORKER_SECRET" \
             -H "Content-Type: application/json" \
-            -d '{"error":"无识别结果"}' \
+            -d '{"error":"empty_page","text":""}' \
             "$BASE_URL/api/ocr-tasks/$TASK_ID/result" > /dev/null 2>&1
+        rm -f "$CACHED_IMG"
     fi
 done
 WORKEREOF
