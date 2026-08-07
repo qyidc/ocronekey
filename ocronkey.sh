@@ -469,6 +469,13 @@ config_sync() {
     if [ "$TEST_RESP" = "200" ] || [ "$TEST_RESP" = "204" ] || [ "$TEST_RESP" = "404" ]; then
         # 200=有任务, 204/404=无任务, 都是正常连接
         echo -e "${GREEN}  Worker 连接成功 (HTTP $TEST_RESP)。${NC}"
+    elif [ "$TEST_RESP" = "401" ] || [ "$TEST_RESP" = "403" ]; then
+        echo -e "${YELLOW}  Worker 返回 $TEST_RESP (Secret 不匹配)，URL 可达但鉴权失败。${NC}"
+        if confirm "  是否仍要继续? (可能是 Secret 写错了, y/n):"; then
+            echo -e "${YELLOW}  继续配置，但请确认 Secret 正确后再启动服务。${NC}"
+        else
+            return
+        fi
     else
         echo -e "${RED}  Worker 连接失败 (HTTP $TEST_RESP)，请检查 URL 和 Secret。${NC}"
         return
