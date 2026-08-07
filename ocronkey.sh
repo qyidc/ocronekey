@@ -755,7 +755,7 @@ while True:
             pass
         finally:
             conn.close()
-        os.system('touch '"$TRIGGER"'')
+        os.system('touch ${TRIGGER}')
     except:
         time.sleep(1)
 " 2>/dev/null &
