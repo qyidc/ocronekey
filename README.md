@@ -70,29 +70,35 @@ curl -H "X-API-Key: your-key" https://你的域名/general/base64
 
 ## Worker 同步架构（可选）
 
+v4.0 起采用**事件驱动**模式，零空闲请求：
+
 ```
-Worker ──→ PDF拆图 ──→ 写入任务队列
-                            ↓ 轮询
-VPS  ←── GET  /api/ocr-tasks/next      (取任务)
+Worker 有新任务
+      │
+      ▼
+POST /worker/wake (带 X-Worker-Secret)    ← 仅这一次请求唤醒 VPS
+      │
+      ▼
+VPS  ←── GET  /api/ocr-tasks/next      (取任务，循环至队列空)
 VPS  ←── GET  /api/ocr-tasks/{id}/image (下载图片)
 VPS  ──→ POST /api/ocr-tasks/{id}/result (回传结果)
-                            ↓
-Worker ←── 获取结果 ──→ 返回用户
+      │
+      ▼
+队列空 → VPS 休眠（socat 监听 127.0.0.1:9898，零网络请求）
 ```
 
-鉴权方式：所有三个 API 端点均使用 `X-Worker-Secret` 头认证，比 D1 API Token 更安全。
+鉴权方式：所有端点均使用 `X-Worker-Secret` 头认证（含 wake 端点，防爬虫误触）。
 
-菜单选 **2. 配置 Worker 同步** 后输入 Worker 域名和 Secret，自动部署 systemd 守护进程。
+菜单选 **2. 配置 Worker 同步** 后输入 Worker 域名和 Secret，自动部署 systemd 守护进程 + Nginx wake 端点。
 
 ### Worker 端需实现的端点
 
 ```
+POST /worker/wake                            → 唤醒 VPS（需 X-Worker-Secret 头，否则 403）
 GET  /api/ocr-tasks/next                     → 200 + {id, documentId, pageNum}  或 204 (无任务)
 GET  /api/ocr-tasks/{id}/image               → 200 + 图片二进制
-POST /api/ocr-tasks/{id}/result              → 接收 {text: "识别文本"} 或 {error: "错误信息"}
+POST /api/ocr-tasks/{id}/result              → 接收 {text, chars} 或 {error}
 ```
-
-所有端点需校验请求头 `X-Worker-Secret`。
 
 ## Cloudflare 注意事项
 

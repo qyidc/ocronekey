@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="4.0.0"
+SCRIPT_VERSION="4.0.1"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -363,12 +363,6 @@ server {
     location ^~ /.well-known/acme-challenge/ {
         root $WEBROOT;
         default_type text/plain;
-    }
-
-    # Worker 触发端点 — 零轮询模式
-    location = /worker/wake {
-        proxy_pass http://127.0.0.1:9898;
-        proxy_read_timeout 5;
     }
 UPSTREAM
 
@@ -769,24 +763,39 @@ SERVICEEOF
     systemctl enable ocr-worker
     systemctl restart ocr-worker
 
-    # 确保 Nginx 有 /worker/wake 触发端点
+    # 确保 Nginx 有 /worker/wake 触发端点（带 Secret 校验防误触）
     get_nginx_dirs
     SITE_CONF="$SITES_AVAILABLE/ocr-$DOMAIN.conf"
-    if [ -f "$SITE_CONF" ] && ! grep -q '/worker/wake' "$SITE_CONF" 2>/dev/null; then
-        echolog_silent() { :; }
-        # 在 acme-challenge location 后面插入 wake 端点
-        sed -i '/location \^~ \/\.well-known\/acme-challenge\/ {/,/}/{
-            /}/a\
-\
-    # Worker 触发端点 — 零轮询模式\
-    location = /worker/wake {\
-        proxy_pass http://127.0.0.1:9898;\
-        proxy_read_timeout 5;\
-    }
-        }' "$SITE_CONF" 2>/dev/null
+    if [ -f "$SITE_CONF" ]; then
+        python3 -c "
+import re, sys
+secret = '''$WORKER_SECRET'''
+conf = '$SITE_CONF'
+with open(conf, 'r') as f:
+    c = f.read()
+# 移除已有的 wake location 和 worker_auth_ok map（避免重复）
+c = re.sub(r'\n\s*location = /worker/wake \{.*?\n\s*\}', '', c, flags=re.DOTALL)
+c = re.sub(r'\nmap \\\$http_x_worker_secret.*?\n\}', '', c, flags=re.DOTALL)
+# 插入 map（在 upstream 前面）
+m = '\nmap \$http_x_worker_secret \$worker_auth_ok {\n    default     0;\n    \"' + secret + '\"   1;\n}\n'
+c = c.replace('\nupstream ocr_backend {', m + '\nupstream ocr_backend {', 1)
+# 插入 wake location（在 acme-challenge 后面）
+w = '''\n    location = /worker/wake {
+        if (\$worker_auth_ok = 0) {
+            return 403;
+        }
+        proxy_pass http://127.0.0.1:9898;
+        proxy_read_timeout 5;
+    }'''
+c = re.sub(r'(location \^~ /\.well-known/acme-challenge/ \{.*?\n    \})', r'\1' + w, c, flags=re.DOTALL)
+with open(conf, 'w') as f:
+    f.write(c)
+" 2>/dev/null
         if nginx -t 2>/dev/null; then
             systemctl reload nginx
-            echo -e "${GREEN}  /worker/wake 触发端点已添加。${NC}"
+            echo -e "${GREEN}  /worker/wake 触发端点已配置 (带 Secret 鉴权)。${NC}"
+        else
+            echo -e "${YELLOW}  Nginx 配置有误，请手动检查 $SITE_CONF${NC}"
         fi
     fi
 
@@ -804,13 +813,15 @@ SERVICEEOF
     echo -e "  状态:         $(systemctl is-active ocr-worker 2>/dev/null)"
     echo ""
     echo -e "${BLUE}Worker 端 (Cloudflare Worker) 需要实现:${NC}"
-    echo "  1) 有新任务时，POST 到触发端点唤醒 VPS:"
+    echo "  1) 有新任务时，POST 触发端点（带 Secret 头）唤醒 VPS:"
     echo -e "     ${CYAN}POST https://$DOMAIN/worker/wake${NC}"
+    echo -e "     ${CYAN}Header: X-Worker-Secret: $WORKER_SECRET${NC}"
     echo "  2) 已有的三个 API 端点 (不变):"
     echo "     GET  ${BASE_URL}/api/ocr-tasks/next"
     echo "     GET  ${BASE_URL}/api/ocr-tasks/{id}/image"
     echo "     POST ${BASE_URL}/api/ocr-tasks/{id}/result"
     echo ""
+    echo -e "${YELLOW}  提示: 无正确 Secret 的请求会被 Nginx 直接返回 403，不会误触发 Worker。${NC}"
 }
 
 # ======================== 3. 同步服务管理 ========================
