@@ -16,7 +16,9 @@ mkdir -p "$TEMP_DIR"
 
 # ─── 主循环 ────────────────────────────────────────────
 
-echo "$LOG_PREFIX 启动，轮询 $BASE_URL/api/ocr-tasks/next"
+echo "$LOG_PREFIX 启动，轮询 $BASE_URL/api/ocr-tasks/next （空闲30s | 活跃连续处理）"
+
+IDLE_EMPTY=0
 
 while true; do
   # 1. 拉取下一个待处理任务
@@ -30,11 +32,16 @@ while true; do
   TASK_ID=$(echo "$TASK_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
   
   if [ -z "$TASK_ID" ]; then
-    # 无任务，等待
-    sleep 3
+    IDLE_EMPTY=$((IDLE_EMPTY + 1))
+    if [ "$IDLE_EMPTY" -le 3 ]; then
+      sleep 2
+    else
+      sleep 30   # 空闲模式
+    fi
     continue
   fi
 
+  IDLE_EMPTY=0
   R2_KEY=$(echo "$TASK_JSON" | grep -o '"r2Key":"[^"]*"' | cut -d'"' -f4)
   DOC_ID=$(echo "$TASK_JSON" | grep -o '"documentId":[0-9]*' | head -1 | grep -o '[0-9]*')
   PAGE_NUM=$(echo "$TASK_JSON" | grep -o '"pageNum":[0-9]*' | head -1 | grep -o '[0-9]*')

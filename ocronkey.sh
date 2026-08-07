@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.8"
+SCRIPT_VERSION="3.2.0"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -505,9 +505,12 @@ echolog() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
-echolog "=== OCR Worker v3.1 启动 ==="
+echolog "=== OCR Worker v3.2 启动 ==="
 echolog "Worker: $BASE_URL"
-echolog "轮询间隔: ${POLL_INTERVAL}s"
+echolog "空闲轮询间隔: ${POLL_INTERVAL}s | 活跃时连续处理"
+
+IDLE_EMPTY=0      # 连续空轮询计数
+MAX_FAST_CHECKS=3  # 处理完一批后快速探测次数
 
 while true; do
     # 1. 拉取下一个待处理任务
@@ -521,10 +524,16 @@ while true; do
     TASK_ID=$(echo "$TASK_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
 
     if [ -z "$TASK_ID" ]; then
-        sleep "$POLL_INTERVAL"
+        IDLE_EMPTY=$((IDLE_EMPTY + 1))
+        if [ "$IDLE_EMPTY" -le "$MAX_FAST_CHECKS" ]; then
+            sleep 2   # 刚处理完一批，快速探测是否有新任务
+        else
+            sleep "$POLL_INTERVAL"  # 空闲模式，慢速轮询
+        fi
         continue
     fi
 
+    IDLE_EMPTY=0     # 有任务，重置空闲计数 → 活跃模式
     DOC_ID=$(echo "$TASK_JSON" | grep -o '"documentId":[0-9]*' | head -1 | grep -o '[0-9]*')
     PAGE_NUM=$(echo "$TASK_JSON" | grep -o '"pageNum":[0-9]*' | head -1 | grep -o '[0-9]*')
 
