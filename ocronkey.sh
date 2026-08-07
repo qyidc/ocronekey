@@ -7,7 +7,7 @@ set -uo pipefail
 # 包含: Docker OCR + Nginx SSL + Worker 同步守护进程
 # =====================================================
 
-SCRIPT_VERSION="3.1.7"
+SCRIPT_VERSION="3.1.8"
 
 # ---- tty fix: curl|bash 管道模式下重定向交互 ----
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
@@ -109,8 +109,14 @@ get_nginx_dirs() {
 detect_install() {
     get_nginx_dirs
     local conf
-    conf=$(shopt -s nullglob; ls "$SITES_AVAILABLE"/ocr-*.conf 2>/dev/null | head -1 || true)
-    [ -n "$conf" ] && basename "$conf" | sed 's/^ocr-//;s/\.conf$//'
+    for conf in "$SITES_AVAILABLE"/ocr-*.conf; do
+        [ -f "$conf" ] || continue
+        # 校验文件内容确实包含 OCR 服务（proxy_pass 到 9899 或 ocr_backend）
+        if grep -qE '(9899|ocr_backend|PaddleOCR)' "$conf" 2>/dev/null; then
+            basename "$conf" | sed 's/^ocr-//;s/\.conf$//'
+            return
+        fi
+    done
 }
 
 get_apikey_from_conf() {
